@@ -9,33 +9,41 @@ normalize_tex() {
     perl -pe 's/(\\[a-zA-Z@]+\*?)[ \t]+(?=[\{\[])/$1/g' "$1" > "$2"
 }
 
-# Function to recursively process LaTeX files in a directory
+# Function to recursively process LaTeX files in a directory.
+# Walks the new version, so files and directories that only exist there
+# are diffed against an empty original and show up as added content.
 process_directory() {
     local original_dir="$1"
     local new_dir="$2"
     local output_dir="$3"
 
-    # Loop through files and directories in the original directory
-    for item in "$original_dir"/*; do
-        local name=$(basename "$item")
-        local new_item="$new_dir/$name"
+    # Loop through files and directories in the new directory
+    for new_item in "$new_dir"/*; do
+        local name=$(basename "$new_item")
+        local item="$original_dir/$name"
         local out_item="$output_dir/$name"
 
-        if [ -d "$item" ]; then
-            if [ -d "$new_item" ]; then
-                process_directory "$item" "$new_item" "$out_item"
+        if [ -d "$new_item" ]; then
+            process_directory "$item" "$new_item" "$out_item"
+        elif [ -f "$new_item" ] && [[ "$new_item" == *.tex ]]; then
+            normalize_tex "$new_item" "$tmp_dir/new.tex"
+            if [ -f "$item" ]; then
+                # Skip unchanged files (output keeps the copy of the new version),
+                # except the main file, which needs the latexdiff preamble
+                if cmp -s "$item" "$new_item" && ! grep -q '\\begin{document}' "$item"; then
+                    continue
+                fi
+                echo "Diffing ${new_item#$new_src/}"
+                normalize_tex "$item" "$tmp_dir/old.tex"
+            else
+                echo "Diffing ${new_item#$new_src/} (new file)"
+                # latexdiff requires both files to have a preamble or neither:
+                # for a new main file, use its preamble with an empty body
+                perl -0pe 's/(\\begin\{document\}).*/$1\n\\end{document}\n/s or $_ = ""' \
+                    "$tmp_dir/new.tex" > "$tmp_dir/old.tex"
             fi
-        elif [ -f "$item" ] && [[ "$item" == *.tex ]] && [ -f "$new_item" ]; then
-            # Skip unchanged files (output keeps the copy of the new version),
-            # except the main file, which needs the latexdiff preamble
-            if cmp -s "$item" "$new_item" && ! grep -q '\\begin{document}' "$item"; then
-                continue
-            fi
-            echo "Diffing ${item#$original_src/}"
 
             mkdir -p "$output_dir"
-            normalize_tex "$item" "$tmp_dir/old.tex"
-            normalize_tex "$new_item" "$tmp_dir/new.tex"
 
             # Run latexdiff on the LaTeX file, then move "\end{env}" onto its own
             # line when it follows the closing brace of latexdiff markup:
@@ -85,5 +93,11 @@ rsync -a "$new_src/" "$output_src/"
 
 # Run latexdiff recursively on the source directories
 process_directory "$original_src" "$new_src" "$output_src"
+
+# Drop the wavy underline from added text, leaving it blue only. Applied to
+# every latexdiff preamble line in the output, including stale preambles left
+# in the sources, since \providecommand keeps whichever definition comes first
+find "$output_src" -name '*.tex' -exec perl -i -pe \
+    's/\\uwave\{#1\}/#1/g, s/\\color\{blue\}\\uwave\]/\\color{blue}]/g if /%DIF PREAMBLE/' {} +
 
 echo "LaTeX diff generated successfully in $output_src."
